@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ app_name }}</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%231d4f91'/%3E%3Ccircle cx='16' cy='16' r='6' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ version }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 40 40" aria-hidden="true">
+        <path d="M3 20c4.5-7.5 10.3-11 17-11s12.5 3.5 17 11c-4.5 7.5-10.3 11-17 11S7.5 27.5 3 20z" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"/>
+        <circle cx="20" cy="20" r="6.2" fill="currentColor"/>
+        <circle cx="22.2" cy="17.8" r="1.8" fill="#fff"/>
+      </svg>
+      <div>
+        <h1>{{ app_name }}</h1>
+        <p class="tagline">Was the child looking at the toy they were playing with?</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="engineBadge" class="badge badge-muted" hidden></span>
+      <span class="version">v{{ version }}</span>
+    </div>
+  </header>
+
+  <main class="page">
+    <!-- ================= SETUP ================= -->
+    <section id="setupView">
+      <div class="card">
+        <div class="card-head">
+          <span class="step">1</span>
+          <div>
+            <h2>Add your recordings</h2>
+            <p class="muted">Drag the three files onto the boxes below - or drop them all at once anywhere on the page.</p>
+          </div>
+        </div>
+
+        <div class="dropgrid">
+          <div class="drop" data-kind="ego" tabindex="0" role="button" aria-label="Add eye-tracking video">
+            <input type="file" accept="video/*,.mp4,.mov,.avi,.mkv,.m4v" hidden>
+            <div class="drop-icon">
+              <svg viewBox="0 0 24 24"><path d="M2 12c2.6-4.3 6-6.5 10-6.5s7.4 2.2 10 6.5c-2.6 4.3-6 6.5-10 6.5S4.6 16.3 2 12z"/><circle cx="12" cy="12" r="3.2"/></svg>
+            </div>
+            <h3>Eye-tracking video</h3>
+            <p class="hint">First-person scene video from the Tobii Pro Glasses</p>
+            <div class="drop-body"></div>
+          </div>
+
+          <div class="drop" data-kind="room" tabindex="0" role="button" aria-label="Add room video">
+            <input type="file" accept="video/*,.mp4,.mov,.avi,.mkv,.m4v" hidden>
+            <div class="drop-icon">
+              <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/></svg>
+            </div>
+            <h3>Room video</h3>
+            <p class="hint">External camera recording of the play session</p>
+            <div class="drop-body"></div>
+          </div>
+
+          <div class="drop" data-kind="gaze" tabindex="0" role="button" aria-label="Add gaze data file">
+            <input type="file" accept=".tsv,.csv,.txt,.xlsx,.xls" hidden>
+            <div class="drop-icon">
+              <svg viewBox="0 0 24 24"><path d="M6 2.5h8l4.5 4.5v14.5H6z"/><path d="M14 2.5V7h4.5"/><path d="M9 12h6M9 15.5h6M9 19h4"/></svg>
+            </div>
+            <h3>Gaze data</h3>
+            <p class="hint">Tobii Pro Lab export (.tsv, .csv or .xlsx)</p>
+            <div class="drop-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="step">2</span>
+          <div>
+            <h2>Objects and quality <span class="optional">optional</span></h2>
+            <p class="muted">Name the toys used in the session for the most reliable results. Leave empty to find them automatically.</p>
+          </div>
+        </div>
+
+        <label class="field-label" for="objectsInput">Objects to track</label>
+        <div class="chips-input" id="chipsBox">
+          <div id="chips" class="chips"></div>
+          <input id="objectsInput" type="text" autocomplete="off"
+                 placeholder="e.g. red ball, teddy bear, blocks, toy car - press Enter or comma after each">
+        </div>
+        <p class="field-help">Tip: colours help tell similar toys apart ("red ball", "blue ball"). Your list is remembered for the next session.</p>
+
+        <div class="field-label">Analysis quality</div>
+        <div class="segmented" id="presetGroup" role="radiogroup"></div>
+        <p class="field-help" id="presetHelp"></p>
+
+        <details class="advanced">
+          <summary>Advanced settings</summary>
+          <div class="adv-grid">
+            <fieldset>
+              <legend>Video synchronisation</legend>
+              <label class="radio"><input type="radio" name="sync" value="audio" checked> Automatic, from the sound tracks <span class="rec">recommended</span></label>
+              <label class="radio"><input type="radio" name="sync" value="manual"> Manual offset
+                <input id="manualOffset" class="num" type="number" step="0.01" value="0" disabled> s</label>
+              <label class="radio"><input type="radio" name="sync" value="none"> Videos are already synchronised</label>
+              <p class="field-help">Offset = how many seconds the room camera started <em>before</em> the glasses (negative if after).</p>
+            </fieldset>
+            <fieldset>
+              <legend>Room video</legend>
+              <label class="lbl" for="childSel">Which person is the child?</label>
+              <select id="childSel">
+                <option value="smallest" selected>The smallest person in view</option>
+                <option value="largest">The largest person in view</option>
+                <option value="only">There is only one person</option>
+              </select>
+              <label class="lbl" for="contactSel">Hand-object contact</label>
+              <select id="contactSel">
+                <option value="strict">Strict - hand must touch the object</option>
+                <option value="normal" selected>Normal</option>
+                <option value="lenient">Lenient - hand near the object counts</option>
+              </select>
+            </fieldset>
+            <fieldset>
+              <legend>Gaze</legend>
+              <label class="lbl" for="gazeTol">Gaze accuracy margin: <strong id="gazeTolVal">2.0</strong>% of frame width</label>
+              <input id="gazeTol" type="range" min="0.5" max="5" step="0.5" value="2">
+              <label class="lbl" for="gazeOffset">Gaze time offset (s)</label>
+              <input id="gazeOffset" class="num" type="number" step="0.01" value="0">
+              <label class="check"><input id="includePeople" type="checkbox" checked> Count people (e.g. a parent's face) as gaze targets</label>
+              <label class="check"><input id="fixOnly" type="checkbox"> Use fixation samples only</label>
+            </fieldset>
+            <fieldset>
+              <legend>Output</legend>
+              <label class="check"><input id="optReviewVideo" type="checkbox" checked> Create a side-by-side review video</label>
+              <label class="lbl" for="maxDur">Analyse only the first ... seconds (blank = all)</label>
+              <input id="maxDur" class="num" type="number" min="5" step="5" placeholder="all">
+            </fieldset>
+          </div>
+        </details>
+      </div>
+
+      <div class="runbar">
+        <button id="runBtn" class="btn-primary" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>
+          Run analysis
+        </button>
+        <p id="runHint" class="muted">Add all three files to start.</p>
+      </div>
+    </section>
+
+    <!-- ================= PROGRESS ================= -->
+    <section id="progressView" hidden>
+      <div class="card">
+        <div class="progress-head">
+          <div>
+            <h2 id="progTitle">Analysing your session...</h2>
+            <p id="progMessage" class="muted">Starting...</p>
+          </div>
+          <div class="prog-right">
+            <div id="progPct" class="prog-pct">0%</div>
+            <div id="progEta" class="muted small"></div>
+          </div>
+        </div>
+        <div class="bar"><div id="progBar" class="bar-fill"></div></div>
+        <ol id="stageList" class="stages"></ol>
+        <div class="progress-actions">
+          <button id="cancelBtn" class="btn-ghost">Cancel</button>
+          <details class="log"><summary>Show details</summary><pre id="logBox"></pre></details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= RESULTS ================= -->
+    <section id="resultsView" hidden>
+      <div class="results-head">
+        <div>
+          <h2>Results</h2>
+          <p id="resultsSub" class="muted"></p>
+        </div>
+        <div class="results-actions">
+          <a id="dlExcel" class="btn-primary" href="#">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
+            Excel report
+          </a>
+          <a id="dlCsv" class="btn-secondary" href="#">CSV timeline</a>
+          <a id="dlVideo" class="btn-secondary" href="#">Review video</a>
+          <button id="openFolder" class="btn-ghost">Open results folder</button>
+          <button id="newRun" class="btn-ghost">New analysis</button>
+        </div>
+      </div>
+      <p id="savedTo" class="saved-to"></p>
+
+      <div id="warnings"></div>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="card">
+        <div class="chart-head">
+          <div>
+            <h3>Session timeline</h3>
+            <p class="muted small">Hover for details. Click anywhere to jump the review video to that moment.</p>
+          </div>
+          <div class="zoom">
+            <span class="muted small">Zoom</span>
+            <button data-zoom="1" class="active">1x</button>
+            <button data-zoom="2">2x</button>
+            <button data-zoom="4">4x</button>
+            <button data-zoom="8">8x</button>
+          </div>
+        </div>
+        <div class="timeline">
+          <div class="lane-labels">
+            <div>Playing with</div>
+            <div>Looking at</div>
+            <div>Looking at played object?</div>
+          </div>
+          <div class="timeline-scroll" id="tlScroll">
+            <svg id="timelineSvg" role="img" aria-label="Timeline of play and gaze"></svg>
+          </div>
+        </div>
+        <div id="legend" class="legend"></div>
+        <div id="tooltip" class="tooltip" hidden></div>
+      </div>
+
+      <div class="two-col">
+        <div class="card" id="videoCard">
+          <h3>Review video</h3>
+          <p class="muted small">Room camera (left) and eye-tracking camera (right) with the detected objects, hands and gaze point.</p>
+          <video id="reviewVideo" controls preload="metadata"></video>
+        </div>
+        <div class="card">
+          <h3>Per object</h3>
+          <p class="muted small">How long each object was played with, and how much of that time the child looked at it.</p>
+          <div id="objLegend" class="legend small"></div>
+          <div class="table-wrap"><table id="objTable" class="data"></table></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Play bouts</h3>
+        <p class="muted small">Each continuous period of playing with an object. Click a row to jump the video there.</p>
+        <div class="table-wrap tall"><table id="boutTable" class="data clickable"></table></div>
+      </div>
+    </section>
+
+    <!-- ================= ERROR ================= -->
+    <section id="errorView" hidden>
+      <div class="card error-card">
+        <h2 id="errTitle">Something went wrong</h2>
+        <p id="errMessage"></p>
+        <details class="log"><summary>Show details</summary><pre id="errLog"></pre></details>
+        <button id="errBack" class="btn-primary">Back to setup</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="dropOverlay" class="drop-overlay" hidden>
+    <div>Drop your files to add them</div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}?v={{ version }}"></script>
+</body>
+</html>

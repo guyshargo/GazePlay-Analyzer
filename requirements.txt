@@ -1,0 +1,14 @@
+# Detection (YOLOE needs ultralytics 8.4+; torch is installed separately by the setup script)
+ultralytics>=8.4.0
+lap>=0.5.12
+# Tokenizer used by YOLOE text prompts - installed from a zip so git is not required
+clip @ https://github.com/ultralytics/CLIP/archive/refs/heads/main.zip
+# Video, data and output
+opencv-python>=4.8
+numpy>=1.24
+pandas>=2.0
+openpyxl>=3.1
+xlsxwriter>=3.1
+imageio-ffmpeg>=0.4.9
+# Interface
+flask>=3.0

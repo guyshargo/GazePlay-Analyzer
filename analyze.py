@@ -45,8 +45,14 @@ def build_settings(args, objects=None, offset=None) -> Settings:
         s.sync_mode, s.manual_offset_s = "manual", float(args.offset)
     elif args.no_sync:
         s.sync_mode = "none"
+    if args.ego_start is not None and args.room_start is not None:
+        s.sync_mode = "segments"
+        s.ego_start_s, s.room_start_s = args.ego_start, args.room_start
+        s.ego_end_s, s.room_end_s = args.ego_end, args.room_end
+    elif any(v is not None for v in (args.ego_start, args.room_start, args.ego_end, args.room_end)):
+        raise SystemExit("--ego-start and --room-start must be given together")
     s.make_review_video = not args.no_video
-    s.include_people = not args.no_people
+    s.include_people = args.include_people
     s.fixations_only = args.fixations_only
     if args.max_seconds:
         s.max_duration_s = args.max_seconds
@@ -78,8 +84,13 @@ def main():
     ap.add_argument("--preset", default="balanced", choices=list(PRESETS))
     ap.add_argument("--offset", type=float, help="manual sync offset in s (room time - glasses time)")
     ap.add_argument("--no-sync", action="store_true", help="videos are already synchronised")
+    ap.add_argument("--ego-start", type=float, help="segment start in the eye-tracking video (s); "
+                    "with --room-start this sets the sync: both starts are the same moment")
+    ap.add_argument("--ego-end", type=float, help="segment end in the eye-tracking video (s)")
+    ap.add_argument("--room-start", type=float, help="segment start in the room video (s)")
+    ap.add_argument("--room-end", type=float, help="segment end in the room video (s)")
     ap.add_argument("--no-video", action="store_true", help="skip the review video")
-    ap.add_argument("--no-people", action="store_true", help="do not count people as gaze targets")
+    ap.add_argument("--include-people", action="store_true", help="count people (e.g. a parent's face) as gaze targets")
     ap.add_argument("--fixations-only", action="store_true")
     ap.add_argument("--max-seconds", type=float, help="analyse only the first N seconds")
     ap.add_argument("--out", help="output folder")

@@ -163,6 +163,17 @@ def run_analysis(ego_video: str, room_video: str, gaze_file: str, out_dir: str |
         dt = 1.0 / s.sample_rate
         start = max(0.0, -offset, gaze.start)
         end = min(ego_info.duration, room_info.duration - offset, gaze.end)
+        if s.sync_mode == "segments":
+            seg_start = float(s.ego_start_s or 0.0)
+            seg_end = float(s.ego_end_s) if s.ego_end_s is not None else ego_info.duration
+            if s.room_start_s is not None and s.room_end_s is not None:
+                seg_end = min(seg_end, seg_start + float(s.room_end_s) - float(s.room_start_s))
+            start, end = max(start, seg_start), min(end, seg_end)
+            prog.log(f"Selected segment: eye-tracking {_clock(start)}-{_clock(end)} = room "
+                     f"{_clock(start + offset)}-{_clock(end + offset)}")
+            if gaze.start > seg_start + 1:
+                warnings.append(f"The gaze data starts at {gaze.start:.1f} s, after the selected start; "
+                                f"the analysis starts there.")
         if s.max_duration_s:
             end = min(end, start + float(s.max_duration_s))
         if end - start < 2 * dt:
@@ -281,7 +292,8 @@ def run_analysis(ego_video: str, room_video: str, gaze_file: str, out_dir: str |
         files = {}
         prog.update(0.2, "Writing Excel workbook...")
         context = _context_sections(s, ego_video, room_video, gaze_file, ego_info, room_info, gaze,
-                                    sync, vocab, source, backend, warnings, timing, time.time() - t_all)
+                                    sync, vocab, source, backend, warnings, timing, time.time() - t_all,
+                                    (times[0], times[-1] + dt))
         files["excel"] = str(write_excel(out_dir / f"{base}_gaze_play_results.xlsx", timeline, bouts,
                                          per_obj, objects_found, metrics, context))
         files["csv"] = str(write_csv(out_dir / f"{base}_timeline.csv", timeline))
@@ -346,18 +358,39 @@ def _safe_stem(stem: str) -> str:
     return keep[:60]
 
 
+def _clock(t: float) -> str:
+    from .sync import fmt_clock
+    return fmt_clock(t)
+
+
 def _context_sections(s, ego_video, room_video, gaze_file, ego_info, room_info, gaze, sync, vocab,
-                      source, backend, warnings, timing, elapsed):
+                      source, backend, warnings, timing, elapsed, window=None):
     gi = gaze.info
     desc = backend.describe() if hasattr(backend, "describe") else {}
+    sync_rows = [
+        ("Method", {"audio": "Automatic (sound tracks)", "manual": "Manual offset",
+                    "none": "None (offset 0)", "segments": "Confirmed by the user in the app"
+                    }.get(sync.method, sync.method)),
+        ("Offset used (room time - eye-tracking time)", f"{sync.offset_s:+.3f} s"),
+        ("Details", sync.message),
+    ]
+    if s.sync_mode == "segments" and s.audio_offset_s is not None:
+        sync_rows += [
+            ("Automatic audio sync result", f"{float(s.audio_offset_s):+.3f} s ({s.audio_confidence or 'n/a'} confidence)"),
+            ("Manual adjustment", f"{sync.offset_s - float(s.audio_offset_s):+.3f} s"),
+        ]
+    elif sync.method != "segments":
+        sync_rows.insert(2, ("Confidence", sync.confidence))
+    if s.sync_mode == "segments":
+        sync_rows += [
+            ("Selected eye-tracking segment", f"{_clock(s.ego_start_s or 0)} - {_clock(s.ego_end_s or ego_info.duration)}"),
+            ("Selected room segment", f"{_clock(s.room_start_s or 0)} - {_clock(s.room_end_s or room_info.duration)}"),
+        ]
+    if window:
+        sync_rows.append(("Analysed (eye-tracking clock)", f"{_clock(window[0])} - {_clock(window[1])}  "
+                                                           f"({window[1] - window[0]:.1f} s)"))
     return {
-        "Synchronisation": [
-            ("Method", {"audio": "Automatic (sound tracks)", "manual": "Manual offset",
-                        "none": "None (offset 0)"}.get(sync.method, sync.method)),
-            ("Offset (room time - eye-tracking time)", f"{sync.offset_s:+.3f} s"),
-            ("Confidence", sync.confidence),
-            ("Details", sync.message),
-        ],
+        "Synchronisation": sync_rows,
         "Input files": [
             ("Eye-tracking video", f"{Path(ego_video).name}  ({ego_info.width}x{ego_info.height}, "
                                    f"{ego_info.fps:.2f} fps, {ego_info.duration:.1f} s)"),

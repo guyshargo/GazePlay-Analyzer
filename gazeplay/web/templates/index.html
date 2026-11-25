@@ -33,47 +33,69 @@
         <div class="card-head">
           <span class="step">1</span>
           <div>
-            <h2>Add your recordings</h2>
-            <p class="muted">Drag the three files onto the boxes below - or drop them all at once anywhere on the page.</p>
+            <h2>Videos and synchronisation</h2>
+            <p class="muted">Add both videos. They are synchronised automatically from their sound. Then fine-tune the offset and the part to analyse with the markers, and confirm.</p>
           </div>
         </div>
 
-        <div class="dropgrid">
-          <div class="drop" data-kind="ego" tabindex="0" role="button" aria-label="Add eye-tracking video">
-            <input type="file" accept="video/*,.mp4,.mov,.avi,.mkv,.m4v" hidden>
-            <div class="drop-icon">
-              <svg viewBox="0 0 24 24"><path d="M2 12c2.6-4.3 6-6.5 10-6.5s7.4 2.2 10 6.5c-2.6 4.3-6 6.5-10 6.5S4.6 16.3 2 12z"/><circle cx="12" cy="12" r="3.2"/></svg>
+        <div class="vgrid">
+          <div class="vcol" data-v="ego">
+            <div class="drop vdrop" data-kind="ego" tabindex="0" role="button" aria-label="Add the POV / eye-tracking video">
+              <input type="file" accept="video/*,.mp4,.mov,.avi,.mkv,.m4v" hidden>
+              <div class="vdrop-empty">
+                <div class="drop-icon">
+                  <svg viewBox="0 0 24 24"><path d="M2 12c2.6-4.3 6-6.5 10-6.5s7.4 2.2 10 6.5c-2.6 4.3-6 6.5-10 6.5S4.6 16.3 2 12z"/><circle cx="12" cy="12" r="3.2"/></svg>
+                </div>
+                <h3>POV / Eye-tracking video</h3>
+                <p class="hint">First-person scene video from the glasses (<b>scenevideo.mp4</b>)</p>
+                <div class="drop-body"></div>
+              </div>
             </div>
-            <h3>Eye-tracking video</h3>
-            <p class="hint">First-person scene video from the Tobii Pro Glasses</p>
-            <div class="drop-body"></div>
+            <div class="tlwrap" data-v="ego"></div>
           </div>
-
-          <div class="drop" data-kind="room" tabindex="0" role="button" aria-label="Add room video">
-            <input type="file" accept="video/*,.mp4,.mov,.avi,.mkv,.m4v" hidden>
-            <div class="drop-icon">
-              <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/></svg>
+          <div class="vcol" data-v="room">
+            <div class="drop vdrop" data-kind="room" tabindex="0" role="button" aria-label="Add the room video">
+              <input type="file" accept="video/*,.mp4,.mov,.avi,.mkv,.m4v" hidden>
+              <div class="vdrop-empty">
+                <div class="drop-icon">
+                  <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/></svg>
+                </div>
+                <h3>Room video</h3>
+                <p class="hint">External camera recording of the play session</p>
+                <div class="drop-body"></div>
+              </div>
             </div>
-            <h3>Room video</h3>
-            <p class="hint">External camera recording of the play session</p>
-            <div class="drop-body"></div>
-          </div>
-
-          <div class="drop" data-kind="gaze" tabindex="0" role="button" aria-label="Add gaze data file">
-            <input type="file" accept=".tsv,.csv,.txt,.xlsx,.xls" hidden>
-            <div class="drop-icon">
-              <svg viewBox="0 0 24 24"><path d="M6 2.5h8l4.5 4.5v14.5H6z"/><path d="M14 2.5V7h4.5"/><path d="M9 12h6M9 15.5h6M9 19h4"/></svg>
-            </div>
-            <h3>Gaze data</h3>
-            <p class="hint">Tobii Pro Lab export (.tsv, .csv or .xlsx)</p>
-            <div class="drop-body"></div>
+            <div class="tlwrap" data-v="room"></div>
           </div>
         </div>
+
+        <div id="syncBar" class="syncbar"></div>
       </div>
 
       <div class="card">
         <div class="card-head">
           <span class="step">2</span>
+          <div>
+            <h2>Gaze data</h2>
+            <p class="muted">The gaze coordinates recorded together with the eye-tracking video.</p>
+          </div>
+        </div>
+        <div class="drop gdrop" data-kind="gaze" tabindex="0" role="button" aria-label="Add gaze data file">
+          <input type="file" accept=".gz,.json,.jsonl,.tsv,.csv,.txt,.xlsx,.xls" hidden>
+          <div class="drop-icon">
+            <svg viewBox="0 0 24 24"><path d="M6 2.5h8l4.5 4.5v14.5H6z"/><path d="M14 2.5V7h4.5"/><path d="M9 12h6M9 15.5h6M9 19h4"/></svg>
+          </div>
+          <div class="gtext">
+            <h3>Gaze data</h3>
+            <p class="hint">Glasses 3 <b>gazedata.gz</b>, or a Pro Lab export (.tsv, .csv, .xlsx)</p>
+          </div>
+          <div class="drop-body"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="step">3</span>
           <div>
             <h2>Objects and quality <span class="optional">optional</span></h2>
             <p class="muted">Name the toys used in the session for the most reliable results. Leave empty to find them automatically.</p>
@@ -96,20 +118,12 @@
           <summary>Advanced settings</summary>
           <div class="adv-grid">
             <fieldset>
-              <legend>Video synchronisation</legend>
-              <label class="radio"><input type="radio" name="sync" value="audio" checked> Automatic, from the sound tracks <span class="rec">recommended</span></label>
-              <label class="radio"><input type="radio" name="sync" value="manual"> Manual offset
-                <input id="manualOffset" class="num" type="number" step="0.01" value="0" disabled> s</label>
-              <label class="radio"><input type="radio" name="sync" value="none"> Videos are already synchronised</label>
-              <p class="field-help">Offset = how many seconds the room camera started <em>before</em> the glasses (negative if after).</p>
-            </fieldset>
-            <fieldset>
               <legend>Room video</legend>
               <label class="lbl" for="childSel">Which person is the child?</label>
               <select id="childSel">
-                <option value="smallest" selected>The smallest person in view</option>
+                <option value="only" selected>There is only one person</option>
+                <option value="smallest">The smallest person in view</option>
                 <option value="largest">The largest person in view</option>
-                <option value="only">There is only one person</option>
               </select>
               <label class="lbl" for="contactSel">Hand-object contact</label>
               <select id="contactSel">
@@ -124,14 +138,8 @@
               <input id="gazeTol" type="range" min="0.5" max="5" step="0.5" value="2">
               <label class="lbl" for="gazeOffset">Gaze time offset (s)</label>
               <input id="gazeOffset" class="num" type="number" step="0.01" value="0">
-              <label class="check"><input id="includePeople" type="checkbox" checked> Count people (e.g. a parent's face) as gaze targets</label>
+              <label class="check"><input id="includePeople" type="checkbox"> Count people (e.g. a parent's face) as gaze targets</label>
               <label class="check"><input id="fixOnly" type="checkbox"> Use fixation samples only</label>
-            </fieldset>
-            <fieldset>
-              <legend>Output</legend>
-              <label class="check"><input id="optReviewVideo" type="checkbox" checked> Create a side-by-side review video</label>
-              <label class="lbl" for="maxDur">Analyse only the first ... seconds (blank = all)</label>
-              <input id="maxDur" class="num" type="number" min="5" step="5" placeholder="all">
             </fieldset>
           </div>
         </details>
@@ -256,6 +264,7 @@
     <div>Drop your files to add them</div>
   </div>
 
+  <script src="{{ url_for('static', filename='videosync.js') }}?v={{ version }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}?v={{ version }}"></script>
 </body>
 </html>

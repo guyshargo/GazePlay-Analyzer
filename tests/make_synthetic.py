@@ -7,6 +7,8 @@ The room camera starts 7.3 s before the glasses.
 """
 from __future__ import annotations
 
+import gzip
+import json
 import subprocess
 import sys
 import wave
@@ -180,13 +182,37 @@ def make_gaze_tsv(path: Path, rng):
     path.write_text("\n".join(rows) + "\n", encoding="utf-8-sig")
 
 
-def ground_truth(rate=5.0):
+LOOK_DOWN = (64.0, 66.0)  # Glasses 3 file only: gaze below the scene camera (y > 1)
+
+
+def make_gazedata_gz(path: Path, rng):
+    """Tobii Pro Glasses 3 native format: JSON lines, seconds, normalised gaze2d, 100 Hz."""
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        t = 0.0013
+        while t < EGO_DUR:
+            if blink(t):
+                rec = {"type": "gaze", "timestamp": round(t, 6), "data": {}}
+            else:
+                p = np.array(EGO_POS[gaze_target(t)]) + ego_drift(t) + rng.normal(0, 5, 2)
+                x, y = p[0] / 960, p[1] / 540
+                if LOOK_DOWN[0] <= t < LOOK_DOWN[1]:
+                    y = 1.12
+                rec = {"type": "gaze", "timestamp": round(t, 6), "data": {
+                    "gaze2d": [x, y], "gaze3d": [0, 0, 600],
+                    "eyeleft": {"pupildiameter": 4.8}, "eyeright": {"pupildiameter": 4.9}}}
+            fh.write(json.dumps(rec) + "\n")
+            t += 0.01
+
+
+def ground_truth(rate=5.0, glasses3=False):
     out = []
     for k in range(int(EGO_DUR * rate)):
         te = k / rate
         h = held_object(te)
         g = gaze_target(te)
         gaze = "No gaze data" if blink(te) else ("No object" if g == "background" else g)
+        if glasses3 and LOOK_DOWN[0] <= te < LOOK_DOWN[1]:
+            gaze = "Outside camera view"
         out.append((te, h or "No object in hand", gaze))
     return out
 
@@ -204,6 +230,7 @@ def main(out_dir: Path):
     for f in ("_room.mp4", "_ego.mp4", "_room.wav", "_ego.wav"):
         (out_dir / f).unlink()
     make_gaze_tsv(out_dir / "gaze_export.tsv", rng)
+    make_gazedata_gz(out_dir / "gazedata.gz", rng)
     print("written to", out_dir)
 
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from .config import NO_GAZE, NO_OBJECT, PERSON_LABEL
+from .config import NO_GAZE, NO_OBJECT, OUTSIDE_VIEW, PERSON_LABEL
 from .detectors import Detection
 from .room_analysis import _label, distance_to_detection
 
@@ -61,8 +61,8 @@ class GazeAnalyzer:
             return GazeSample(t, NO_GAZE)
         gx, gy, movement = gaze
         h, w = frame.shape[:2]
-        if not (-0.05 * w <= gx <= 1.05 * w and -0.05 * h <= gy <= 1.05 * h):
-            return GazeSample(t, NO_OBJECT, (gx, gy), movement)  # looking outside the scene camera
+        if not (-0.03 * w <= gx <= 1.03 * w and -0.03 * h <= gy <= 1.03 * h):
+            return GazeSample(t, OUTSIDE_VIEW, (gx, gy), movement)  # not visible in the scene camera
         crop = gaze_crop(gx, gy, w, h, self.s.gaze_crop_frac) if self.s.gaze_crop else None
         if crop is not None and (crop[2] - crop[0]) * (crop[3] - crop[1]) < 0.85 * w * h:
             x1, y1, x2, y2 = crop

@@ -14,12 +14,15 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, render_template, request, send_file
+import cv2
+import numpy as np
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file
 
 from ..config import (APP_NAME, APP_VERSION, PRESET_DESCRIPTIONS, PRESETS, RESULTS_DIR, WORKSPACE_DIR,
                       Settings, parse_object_list)
 from ..gaze_data import summarize_gaze_file
 from ..pipeline import STAGES, Cancelled, run_analysis
+from ..sync import AUDIO_SR, extract_audio, ffmpeg_exe, offset_from_envelopes, onset_envelope  # noqa: F401
 from ..video_io import probe_video
 
 HERE = Path(__file__).resolve().parent
@@ -28,7 +31,7 @@ app.config["MAX_CONTENT_LENGTH"] = None
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv", ".webm", ".mts", ".mpg", ".mpeg"}
-GAZE_EXT = {".tsv", ".csv", ".txt", ".xlsx", ".xls", ".xlsm"}
+GAZE_EXT = {".tsv", ".csv", ".txt", ".xlsx", ".xls", ".xlsm", ".gz", ".json", ".jsonl", ".ndjson"}
 UPLOAD_DIR = WORKSPACE_DIR / "uploads"
 
 UPLOADS: dict[str, dict] = {}
@@ -36,6 +39,11 @@ JOBS: dict[str, "Job"] = {}
 _backend = None
 _backend_lock = threading.Lock()
 _run_lock = threading.Lock()
+_AUDIO: dict[str, dict] = {}        # upload id -> {"env", "wave", "duration"} (sync window)
+_THUMBS: dict[tuple, bytes] = {}
+_PROXY: dict[str, dict] = {}        # upload id -> {"state", "progress", "path", "error"}
+_SYNC_JOBS: dict[str, dict] = {}    # "ego_id|room_id" -> automatic audio-sync job (runs once per pair)
+_media_locks: dict[str, threading.Lock] = {}
 
 
 class Job:
@@ -68,7 +76,7 @@ def _get_backend():
         if _backend is None:
             if os.environ.get("GAZEPLAY_BACKEND") == "mock":  # test mode, see tests/
                 sys.path.insert(0, str(HERE.parent.parent / "tests"))
-                from mock_backend import MockBackend
+                from tests.mock_backend import MockBackend
                 _backend = MockBackend()
             else:
                 from ..detectors import UltralyticsBackend
@@ -122,7 +130,8 @@ def upload():
     ext = Path(name).suffix.lower()
     allowed = GAZE_EXT if kind == "gaze" else VIDEO_EXT
     if ext not in allowed:
-        what = "a gaze data file (.tsv, .csv or .xlsx)" if kind == "gaze" else "a video file (.mp4, .mov, .avi...)"
+        what = ("a gaze data file (Glasses 3 gazedata.gz, or a Pro Lab .tsv/.csv/.xlsx export)" if kind == "gaze"
+                else "a video file (.mp4, .mov, .avi...)")
         return jsonify(error=f"'{Path(name).name}' is not {what}."), 400
     uid = uuid.uuid4().hex[:12]
     folder = UPLOAD_DIR / uid
@@ -144,7 +153,8 @@ def upload():
             if not info.get("ok"):
                 raise ValueError(info.get("error", "Unrecognised gaze file."))
             rate = f" at {info['sampling_rate_hz']:.0f} Hz" if info.get("sampling_rate_hz") else ""
-            summary = (f"{info['rows']:,} rows{rate} | {_fmt_dur(info.get('duration_s', 0))} | "
+            source = "Glasses 3 | " if "Glasses 3" in info.get("format", "") else ""
+            summary = (f"{source}{info['rows']:,} samples{rate} | {_fmt_dur(info.get('duration_s', 0))} | "
                        f"{info.get('valid_pct', 0):.0f}% valid gaze")
         else:
             vi = probe_video(str(dest))
@@ -161,9 +171,193 @@ def upload():
 @app.delete("/api/upload/<uid>")
 def delete_upload(uid):
     item = UPLOADS.pop(uid, None)
+    _AUDIO.pop(uid, None)
+    _PROXY.pop(uid, None)
+    for key in [k for k in _SYNC_JOBS if uid in k.split("|")]:
+        _SYNC_JOBS.pop(key, None)
+    for key in [k for k in _THUMBS if k[0] == uid]:
+        _THUMBS.pop(key, None)
     if item:
         shutil.rmtree(Path(item["path"]).parent, ignore_errors=True)
     return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Sync window: streaming, thumbnails, waveform, sound-based suggestion, preview proxy
+# ---------------------------------------------------------------------------
+def _upload_or_404(uid: str) -> dict:
+    item = UPLOADS.get(uid)
+    if not item or item["kind"] not in ("ego", "room") or not Path(item["path"]).exists():
+        abort(404)
+    return item
+
+
+def _lock_for(uid: str) -> threading.Lock:
+    with _backend_lock:
+        return _media_locks.setdefault(uid, threading.Lock())
+
+
+@app.get("/api/media/<uid>")
+def media(uid):
+    item = _upload_or_404(uid)
+    path = item["path"]
+    if request.args.get("proxy") == "1":
+        p = _PROXY.get(uid, {})
+        if p.get("state") != "done":
+            abort(404)
+        path = p["path"]
+    # MP4-family containers (.mp4/.mov/.m4v) are sniffed fine by browsers as video/mp4
+    mime = {".webm": "video/webm", ".ogv": "video/ogg"}.get(Path(path).suffix.lower(), "video/mp4")
+    return send_file(path, mimetype=mime, conditional=True)
+
+
+@app.get("/api/thumbs/<uid>")
+def thumbs(uid):
+    item = _upload_or_404(uid)
+    n = max(4, min(40, int(request.args.get("n", 12))))
+    key = (uid, n)
+    if key not in _THUMBS:
+        with _lock_for(uid):
+            if key not in _THUMBS:
+                h = 72
+                cap = cv2.VideoCapture(item["path"])
+                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) or int(item["info"].get("frames", 1))
+                w = max(2, int(round(h * item["info"]["width"] / max(1, item["info"]["height"]))))
+                tiles = []
+                for i in range(n):
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int((i + 0.5) * total / n))
+                    ok, fr = cap.read()
+                    tiles.append(cv2.resize(fr, (w, h), interpolation=cv2.INTER_AREA) if ok
+                                 else np.zeros((h, w, 3), np.uint8))
+                cap.release()
+                ok, buf = cv2.imencode(".jpg", np.hstack(tiles), [cv2.IMWRITE_JPEG_QUALITY, 72])
+                _THUMBS[key] = buf.tobytes()
+    return Response(_THUMBS[key], mimetype="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+
+def _audio_info(uid: str) -> dict:
+    if uid not in _AUDIO:
+        with _lock_for(uid):
+            if uid not in _AUDIO:
+                audio = extract_audio(UPLOADS[uid]["path"])
+                if audio is None:
+                    _AUDIO[uid] = {"env": None, "wave": [], "duration": 0.0}
+                else:
+                    bins = 1200
+                    n = len(audio) // bins * bins
+                    peaks = np.abs(audio[:n]).reshape(bins, -1).max(axis=1) if n else np.zeros(bins)
+                    ref = float(np.percentile(peaks, 99)) or 1.0
+                    wave = np.sqrt(np.clip(peaks / ref, 0, 1))  # sqrt: quiet sounds stay visible
+                    _AUDIO[uid] = {"env": onset_envelope(audio), "wave": [round(float(v), 3) for v in wave],
+                                   "duration": len(audio) / AUDIO_SR}
+    return _AUDIO[uid]
+
+
+@app.get("/api/waveform/<uid>")
+def waveform(uid):
+    _upload_or_404(uid)
+    info = _audio_info(uid)
+    return jsonify(has_audio=info["env"] is not None, peaks=info["wave"], duration=info["duration"])
+
+
+def _run_sync_job(key: str, ego_id: str, room_id: str):
+    """Automatic audio synchronisation, in the background: read both sound tracks (in parallel),
+    then cross-correlate them. Started once per video pair; never re-run by manual adjustments."""
+    job = _SYNC_JOBS[key]
+    try:
+        job.update(step="Reading the sound tracks of both videos...", progress=0.1)
+        done = {}
+
+        def read(uid):
+            done[uid] = _audio_info(uid)
+            job["progress"] = round(job["progress"] + 0.35, 2)
+
+        threads = [threading.Thread(target=read, args=(u,), daemon=True) for u in (ego_id, room_id)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        a, b = done.get(ego_id), done.get(room_id)
+        job.update(step="Comparing the two sound tracks...", progress=0.85)
+        if not a or not b or a["env"] is None or b["env"] is None:
+            which = "eye-tracking video" if (not a or a["env"] is None) else "room video"
+            job.update(state="done", progress=1.0, available=False, offset_s=0.0, confidence="none",
+                       message=f"The {which} has no usable sound track, so the videos could not be synchronised "
+                               f"automatically. The offset starts at 0 s - set it by hand.")
+            return
+        offset, conf, z = offset_from_envelopes(a["env"], b["env"])
+        job.update(state="done", progress=1.0, available=True, offset_s=round(float(offset), 3),
+                   confidence=conf, score=round(float(z), 1), message="")
+    except Exception as exc:  # report, never crash the server
+        job.update(state="done", progress=1.0, available=False, offset_s=0.0, confidence="none",
+                   message=f"Automatic synchronisation failed ({exc}). The offset starts at 0 s - set it by hand.")
+
+
+@app.post("/api/sync/start")
+def sync_start():
+    data = request.get_json(force=True, silent=True) or {}
+    ego, room = _upload_or_404(data.get("ego", "")), _upload_or_404(data.get("room", ""))
+    key = f"{ego['id']}|{room['id']}"
+    with _backend_lock:
+        if key not in _SYNC_JOBS:
+            _SYNC_JOBS[key] = {"id": key, "state": "running", "step": "Starting...", "progress": 0.0,
+                               "started": time.time()}
+            threading.Thread(target=_run_sync_job, args=(key, ego["id"], room["id"]), daemon=True).start()
+    return jsonify(_SYNC_JOBS[key])
+
+
+@app.get("/api/sync/status")
+def sync_status():
+    job = _SYNC_JOBS.get(request.args.get("key", ""))
+    if not job:
+        return jsonify(error="Unknown synchronisation job."), 404
+    return jsonify(job)
+
+
+def _make_proxy(uid: str):
+    item = UPLOADS[uid]
+    out = Path(item["path"]).parent / "preview_proxy.mp4"
+    st = _PROXY[uid]
+    exe = ffmpeg_exe()
+    if not exe:
+        st.update(state="error", error="ffmpeg is not available to convert this video.")
+        return
+    dur = float(item["info"].get("duration_s") or 1.0)
+    cmd = [exe, "-y", "-v", "error", "-nostdin", "-i", item["path"], "-vf", "scale=-2:'min(540,ih)'",
+           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-g", "25", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", "-progress", "pipe:1", str(out)]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for line in proc.stdout:
+            if line.startswith("out_time_ms="):
+                try:
+                    st["progress"] = min(0.99, int(line.split("=")[1]) / 1e6 / dur)
+                except ValueError:
+                    pass
+        proc.wait()
+        if proc.returncode == 0 and out.exists():
+            st.update(state="done", progress=1.0, path=str(out))
+        else:
+            st.update(state="error", error=(proc.stderr.read() or "conversion failed")[-300:])
+    except Exception as exc:
+        st.update(state="error", error=str(exc))
+
+
+@app.post("/api/proxy/<uid>")
+def start_proxy(uid):
+    _upload_or_404(uid)
+    with _lock_for(uid):
+        if uid not in _PROXY or _PROXY[uid]["state"] == "error":
+            _PROXY[uid] = {"state": "running", "progress": 0.0}
+            threading.Thread(target=_make_proxy, args=(uid,), daemon=True).start()
+    return jsonify(_PROXY[uid])
+
+
+@app.get("/api/proxy/<uid>")
+def proxy_status(uid):
+    _upload_or_404(uid)
+    st = _PROXY.get(uid, {"state": "none"})
+    return jsonify({k: v for k, v in st.items() if k != "path"})
 
 
 # ---------------------------------------------------------------------------
@@ -173,20 +367,49 @@ def _settings_from_request(data: dict) -> Settings:
     adv = data.get("advanced") or {}
     s = Settings.from_preset(data.get("preset", "balanced"))
     s.objects = parse_object_list(data.get("objects", ""))
-    s.sync_mode = adv.get("sync_mode", "audio") if adv.get("sync_mode") in ("audio", "manual", "none") else "audio"
-    s.manual_offset_s = float(adv.get("manual_offset_s") or 0.0)
+    apply_confirmed_sync(s, data.get("sync"), UPLOADS[data["ego"]]["info"], UPLOADS[data["room"]]["info"])
     s.gaze_offset_s = float(adv.get("gaze_offset_s") or 0.0)
-    if adv.get("child_selection") in ("smallest", "largest", "only"):
+    if adv.get("child_selection") in ("only", "smallest", "largest"):
         s.child_selection = adv["child_selection"]
     s.contact_distance = {"strict": 0.20, "normal": 0.30, "lenient": 0.45}.get(adv.get("contact", "normal"), 0.30)
     if adv.get("gaze_tolerance_pct") not in (None, ""):
         s.gaze_tolerance = max(0.005, min(0.10, float(adv["gaze_tolerance_pct"]) / 100.0))
-    s.include_people = bool(adv.get("include_people", True))
+    s.include_people = bool(adv.get("include_people", False))
     s.fixations_only = bool(adv.get("fixations_only", False))
-    s.make_review_video = bool(adv.get("review_video", True))
-    if adv.get("max_duration_s"):
-        s.max_duration_s = float(adv["max_duration_s"])
+    s.make_review_video = True          # the side-by-side review video is always produced
     return s
+
+
+SYNC_TOLERANCE_S = 0.06   # float rounding / container duration differences
+
+
+def apply_confirmed_sync(s: Settings, sync: dict | None, ego_info: dict, room_info: dict):
+    """Use exactly the synchronisation the user confirmed: room time = eye-tracking time + offset,
+    analysed part = [ego_start, ego_end] on the eye-tracking clock (and the same moments + offset
+    on the room clock)."""
+    if not sync or not sync.get("confirmed"):
+        raise ValueError("Please confirm the video synchronisation first.")
+    try:
+        off = round(float(sync["offset"]), 6)
+        e0, e1 = float(sync["ego_start"]), float(sync["ego_end"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("The confirmed synchronisation is incomplete - please confirm it again.")
+    d_ego, d_room = float(ego_info.get("duration_s") or 0), float(room_info.get("duration_s") or 0)
+    if not (-SYNC_TOLERANCE_S <= e0 < e1 <= d_ego + SYNC_TOLERANCE_S):
+        raise ValueError(f"The selected eye-tracking part ({e0:.2f}-{e1:.2f} s) is outside the video.")
+    if not (e0 + off >= -SYNC_TOLERANCE_S and e1 + off <= d_room + SYNC_TOLERANCE_S):
+        raise ValueError(f"With an offset of {off:+.3f} s the selected part falls outside the room video.")
+    e0 = max(e0, 0.0, -off)
+    e1 = min(e1, d_ego, d_room - off)
+    if e1 - e0 < 1.0:
+        raise ValueError("The selected part is shorter than 1 second.")
+    s.sync_mode = "segments"
+    s.sync_offset_s = off
+    s.ego_start_s, s.ego_end_s = e0, e1
+    s.room_start_s, s.room_end_s = e0 + off, e1 + off
+    if sync.get("audio_offset") is not None:
+        s.audio_offset_s = float(sync["audio_offset"])
+        s.audio_confidence = str(sync.get("audio_confidence") or "n/a")
 
 
 def _worker(job: Job, paths: dict, settings: Settings):
@@ -205,6 +428,9 @@ def _worker(job: Job, paths: dict, settings: Settings):
             result["downloads"] = {k: f"/api/download/{job.id}/{k}" for k in result["files"]}
             result["out_dir"] = str(job.out_dir)
             result["file_names"] = {k: Path(v).name for k, v in result["files"].items()}
+            result["sync_used"] = {"offset": settings.sync_offset_s, "ego_start": settings.ego_start_s,
+                                   "ego_end": settings.ego_end_s, "room_start": settings.room_start_s,
+                                   "room_end": settings.room_end_s}
             job.result = result
             job.state = "done"
         except Cancelled:
@@ -228,7 +454,7 @@ def run():
     try:
         settings = _settings_from_request(data)
     except (TypeError, ValueError) as exc:
-        return jsonify(error=f"Invalid setting: {exc}"), 400
+        return jsonify(error=str(exc)), 400
     stem = Path(UPLOADS[data["ego"]]["name"]).stem
     out_dir = RESULTS_DIR / f"{_safe_name(stem)[:40]}_{datetime.now():%Y-%m-%d_%H%M%S}"
     job = Job(uuid.uuid4().hex[:12], out_dir)

@@ -124,6 +124,25 @@ def cross_correlate_offset(env_ego: np.ndarray, env_room: np.ndarray, rate: floa
     return lag / rate, float(z), ratio
 
 
+def fmt_clock(t: float) -> str:
+    t = max(0.0, float(t))
+    m, s = divmod(t, 60)
+    h, m = divmod(int(m), 60)
+    return (f"{h}:{m:02d}:{s:05.2f}" if h else f"{m:02d}:{s:05.2f}")
+
+
+def offset_from_envelopes(e1: np.ndarray, e2: np.ndarray):
+    """(offset_s, confidence, z) for room = ego + offset."""
+    offset, z, ratio = cross_correlate_offset(e1, e2, 1.0 / ENV_HOP_S)
+    if z >= 12 and ratio >= 1.25:
+        conf = "high"
+    elif z >= 7 and ratio >= 1.1:
+        conf = "medium"
+    else:
+        conf = "low"
+    return offset, conf, z
+
+
 def estimate_offset_from_audio(ego_video: str, room_video: str, log=lambda m: None) -> SyncResult:
     ego = extract_audio(ego_video)
     room = extract_audio(room_video)
@@ -132,15 +151,7 @@ def estimate_offset_from_audio(ego_video: str, room_video: str, log=lambda m: No
         return SyncResult(0.0, "none", "n/a", 0.0,
                           f"No usable audio track in the {which}; assumed both videos start together "
                           f"(offset 0 s). Enter the offset manually under Advanced settings if needed.")
-    rate = 1.0 / ENV_HOP_S
-    e1, e2 = onset_envelope(ego), onset_envelope(room)
-    offset, z, ratio = cross_correlate_offset(e1, e2, rate)
-    if z >= 12 and ratio >= 1.25:
-        conf = "high"
-    elif z >= 7 and ratio >= 1.1:
-        conf = "medium"
-    else:
-        conf = "low"
+    offset, conf, z = offset_from_envelopes(onset_envelope(ego), onset_envelope(room))
     who = "room camera started" if offset >= 0 else "eye-tracking glasses started"
     msg = f"Audio sync: {who} {abs(offset):.2f} s earlier (confidence: {conf})."
     if conf == "low":
@@ -152,6 +163,17 @@ def estimate_offset_from_audio(ego_video: str, room_video: str, log=lambda m: No
 
 def resolve_sync(settings, ego_video: str, room_video: str, log=lambda m: None) -> SyncResult:
     mode = (settings.sync_mode or "audio").lower()
+    if mode == "segments":
+        e0, r0 = float(settings.ego_start_s or 0.0), float(settings.room_start_s or 0.0)
+        off = float(settings.sync_offset_s) if settings.sync_offset_s is not None else r0 - e0
+        msg = f"Confirmed by the user: offset {off:+.3f} s (eye-tracking {fmt_clock(e0)} = room {fmt_clock(r0)})."
+        if settings.audio_offset_s is not None:
+            adj = off - float(settings.audio_offset_s)
+            msg += (f" Automatic audio sync found {float(settings.audio_offset_s):+.3f} s"
+                    f" ({settings.audio_confidence or 'n/a'} confidence)"
+                    + (f"; adjusted by hand by {adj:+.3f} s." if abs(adj) >= 0.0005 else "; used unchanged."))
+        conf = settings.audio_confidence if settings.audio_offset_s is not None else "n/a"
+        return SyncResult(off, "segments", conf or "n/a", 0.0, msg)
     if mode == "manual":
         return SyncResult(float(settings.manual_offset_s), "manual", "n/a", 0.0,
                           f"Manual offset: {settings.manual_offset_s:+.2f} s.")

@@ -1,6 +1,8 @@
-"""Load gaze data exported from Tobii Pro Lab (TSV / CSV / Excel).
+"""Load gaze data: Tobii Pro Glasses 3 recordings (gazedata.gz) or Tobii Pro Lab exports
+(TSV / CSV / Excel).
 
 Handles the variations seen in practice:
+  * Glasses 3 native 'gazedata.gz' (JSON lines, seconds, normalised 'gaze2d')
   * tab, semicolon or comma separated files, UTF-8 / UTF-16 / Latin-1
   * decimal commas (European locale exports)
   * timestamps in micro-, milli- or seconds, with or without units in the header
@@ -9,6 +11,8 @@ Handles the variations seen in practice:
 """
 from __future__ import annotations
 
+import gzip
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -111,9 +115,72 @@ def _detect_text_format(path: Path):
     return enc, sep
 
 
+def _is_json_lines(path: Path) -> bool:
+    with open(path, "rb") as fh:
+        head = fh.read(4096)
+    if head[:2] == b"\x1f\x8b":  # gzip
+        return True
+    return head.lstrip(b"\xef\xbb\xbf \r\n\t")[:1] == b"{"
+
+
+def read_glasses3_gazedata(path: str | Path) -> pd.DataFrame:
+    """Tobii Pro Glasses 3 'gazedata.gz': one JSON object per line, e.g.
+    {"type":"gaze","timestamp":0.0113,"data":{"gaze2d":[0.32,0.99],"eyeleft":{"pupildiameter":4.8},...}}
+    timestamp = seconds since recording start (same clock as scenevideo.mp4);
+    gaze2d = normalised scene-camera coordinates (0,0 top-left .. 1,1 bottom-right);
+    "data": {} marks a sample without gaze (blink / tracking loss)."""
+    path = Path(path)
+    with open(path, "rb") as fh:
+        is_gz = fh.read(2) == b"\x1f\x8b"
+    opener = gzip.open if is_gz else open
+    ts, xs, ys, pl, pr = [], [], [], [], []
+    bad = 0
+    with opener(path, "rt", encoding="utf-8-sig", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                bad += 1
+                if bad > 50 and not ts:
+                    break
+                continue
+            if not isinstance(obj, dict) or obj.get("type", "gaze") != "gaze" or "timestamp" not in obj:
+                continue
+            data = obj.get("data") or {}
+            g = data.get("gaze2d")
+            ts.append(float(obj["timestamp"]))
+            if isinstance(g, (list, tuple)) and len(g) >= 2 and g[0] is not None and g[1] is not None:
+                xs.append(float(g[0]))
+                ys.append(float(g[1]))
+            else:
+                xs.append(np.nan)
+                ys.append(np.nan)
+            pl.append((data.get("eyeleft") or {}).get("pupildiameter", np.nan))
+            pr.append((data.get("eyeright") or {}).get("pupildiameter", np.nan))
+    if not ts:
+        raise ValueError("This file is not a Tobii Pro Glasses 3 gaze file (no gaze records with a "
+                         "timestamp were found). Use the 'gazedata.gz' from the recording folder or a "
+                         "Tobii Pro Lab data export.")
+    df = pd.DataFrame({
+        "Recording timestamp [s]": ts,
+        "Gaze2d X (norm)": xs,
+        "Gaze2d Y (norm)": ys,
+        "Pupil diameter left [mm]": pd.to_numeric(pd.Series(pl), errors="coerce"),
+        "Pupil diameter right [mm]": pd.to_numeric(pd.Series(pr), errors="coerce"),
+    })
+    df.attrs["format"] = "Tobii Pro Glasses 3 recording (gazedata)"
+    return df
+
+
 def read_table(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     suffix = path.suffix.lower()
+    if suffix in (".gz", ".json", ".jsonl", ".ndjson") or (
+            suffix not in (".xlsx", ".xlsm", ".xls") and _is_json_lines(path)):
+        return read_glasses3_gazedata(path)
     if suffix in (".xlsx", ".xlsm", ".xls"):
         df = pd.read_excel(path, sheet_name=0, dtype=str)
     else:
@@ -180,7 +247,8 @@ def summarize_gaze_file(path: str | Path) -> dict:
     tcol = _find(df.columns, _TIME_PATTERNS)
     xcol = _find(df.columns, _X_PATTERNS)
     ycol = _find(df.columns, _Y_PATTERNS)
-    out = {"rows": int(len(df)), "columns": len(df.columns), "time_column": tcol,
+    out = {"format": df.attrs.get("format", "table export"), "rows": int(len(df)),
+           "columns": len(df.columns), "time_column": tcol,
            "x_column": xcol, "y_column": ycol, "ok": bool(tcol and xcol and ycol)}
     if out["ok"]:
         t = _to_float(df[tcol])
@@ -206,7 +274,8 @@ def load_gaze(path: str | Path, video_w: int, video_h: int, video_duration: floa
               fixations_only: bool = False, time_offset_s: float = 0.0) -> GazeData:
     df = read_table(path)
     cols = list(df.columns)
-    info: dict = {"file": Path(path).name, "rows_in_file": int(len(df))}
+    info: dict = {"file": Path(path).name, "format": df.attrs.get("format", "Tobii Pro Lab export"),
+                  "rows_in_file": int(len(df))}
     warnings: list[str] = []
 
     rec_col = _find(cols, _RECORDING_PATTERNS)

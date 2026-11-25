@@ -5,8 +5,8 @@ from collections import Counter
 
 import pandas as pd
 
-from .config import (CHILD_NOT_VISIBLE, HANDS_NOT_VISIBLE, MULTI_SEP, NO_GAZE, NO_OBJECT,
-                     NON_OBJECT_INTERACTION)
+from .config import (CHILD_NOT_VISIBLE, HANDS_NOT_VISIBLE, MULTI_SEP, NO_GAZE, NON_OBJECT_GAZE,
+                     NON_OBJECT_INTERACTION, OUTSIDE_VIEW)
 
 COL_TS = "Timestamp"
 COL_INTER = "Interacted Object"
@@ -47,7 +47,7 @@ def interaction_objects(label: str) -> list[str]:
 
 def match_status(inter: str, gaze: str) -> str:
     objs = interaction_objects(inter)
-    if not objs or gaze == NO_GAZE:
+    if not objs or gaze in (NO_GAZE, OUTSIDE_VIEW):  # unknown: we cannot see what was looked at
         return "n/a"
     return "Yes" if gaze in objs else "No"
 
@@ -109,7 +109,7 @@ def play_bouts(df: pd.DataFrame, dt: float) -> pd.DataFrame:
     for n, (a, b) in enumerate(bouts, 1):
         objs = interaction_objects(labels[a])
         g = gazes[a: b + 1]
-        valid = [x for x in g if x != NO_GAZE]
+        valid = [x for x in g if x not in (NO_GAZE, OUTSIDE_VIEW)]
         looking = [x for x in valid if x in objs]
         first = next((times[a + j] - times[a] for j, x in enumerate(g) if x in objs), None)
         others = Counter(x for x in valid if x not in objs)
@@ -123,7 +123,7 @@ def play_bouts(df: pd.DataFrame, dt: float) -> pd.DataFrame:
             "% Time Looking at It": round(100 * len(looking) / len(valid), 1) if valid else None,
             "Looked at It?": "Yes" if looking else ("No" if valid else "n/a"),
             "Time to First Look (s)": None if first is None else round(first, 2),
-            "Gaze Data Coverage (%)": round(100 * len(valid) / len(g), 1),
+            "Gaze Data Coverage (%)": round(100 * len(valid) / len(g), 1),  # gaze inside the camera view
             "Other Things Looked At": other_txt,
             "Start (s)": round(times[a], 3),
         })
@@ -140,7 +140,7 @@ def per_object_stats(df: pd.DataFrame, bouts: pd.DataFrame, dt: float, vocabular
     seen = [lab for lab in vocabulary]
     for s in inter_sets:
         seen += [x for x in s if x not in seen]
-    seen += [g for g in dict.fromkeys(gazes) if g not in seen and g not in (NO_GAZE, NO_OBJECT)]
+    seen += [g for g in dict.fromkeys(gazes) if g not in seen and g not in NON_OBJECT_GAZE]
     n = max(1, len(df))
     room_det = Counter()
     for s in room_samples:
@@ -158,7 +158,7 @@ def per_object_stats(df: pd.DataFrame, bouts: pd.DataFrame, dt: float, vocabular
     rows = []
     for lab in seen:
         play = [i for i, s in enumerate(inter_sets) if lab in s]
-        play_valid = [i for i in play if gazes[i] != NO_GAZE]
+        play_valid = [i for i in play if gazes[i] not in (NO_GAZE, OUTSIDE_VIEW)]
         look_play = [i for i in play_valid if gazes[i] == lab]
         gaze_n = sum(1 for g in gazes if g == lab)
         rows.append({
@@ -185,12 +185,13 @@ def summary_metrics(df: pd.DataFrame, bouts: pd.DataFrame, dt: float) -> dict:
     child_vis = sum(1 for x in inter if x != CHILD_NOT_VISIBLE)
     hands_vis = sum(1 for x in inter if x not in (CHILD_NOT_VISIBLE, HANDS_NOT_VISIBLE))
     playing = [i for i, x in enumerate(inter) if interaction_objects(x)]
-    playing_valid = [i for i in playing if gaze[i] != NO_GAZE]
+    playing_valid = [i for i in playing if gaze[i] not in (NO_GAZE, OUTSIDE_VIEW)]
     yes = sum(1 for i in playing_valid if gaze[i] in interaction_objects(inter[i]))
     gaze_valid = sum(1 for g in gaze if g != NO_GAZE)
-    on_obj = sum(1 for g in gaze if g not in (NO_GAZE, NO_OBJECT))
+    on_obj = sum(1 for g in gaze if g not in NON_OBJECT_GAZE)
+    outside = sum(1 for g in gaze if g == OUTSIDE_VIEW)
     play_counter = Counter(o for i in playing for o in interaction_objects(inter[i]))
-    gaze_counter = Counter(g for g in gaze if g not in (NO_GAZE, NO_OBJECT))
+    gaze_counter = Counter(g for g in gaze if g not in NON_OBJECT_GAZE)
     pct = lambda a, b: round(100.0 * a / b, 1) if b else None  # noqa: E731
     return {
         "analysed_from": fmt_ts(df[COL_T].iloc[0]) if n else "",
@@ -203,6 +204,7 @@ def summary_metrics(df: pd.DataFrame, bouts: pd.DataFrame, dt: float) -> dict:
         "playing_pct": pct(len(playing), n),
         "gaze_valid_pct": pct(gaze_valid, n),
         "gaze_on_object_pct": pct(on_obj, gaze_valid),
+        "gaze_outside_view_pct": pct(outside, gaze_valid),
         "looking_at_played_pct": pct(yes, len(playing_valid)),
         "looking_at_played_time_s": round(yes * dt, 1),
         "play_bouts": int(len(bouts)),

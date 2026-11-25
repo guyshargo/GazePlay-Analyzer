@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const SVGNS = "http://www.w3.org/2000/svg";
 
 const VIDEO_RE = /\.(mp4|mov|avi|mkv|m4v|wmv|webm|mts|mpg|mpeg)$/i;
-const GAZE_RE = /\.(tsv|csv|txt|xlsx|xls|xlsm)$/i;
+const GAZE_RE = /\.(gz|json|jsonl|ndjson|tsv|csv|txt|xlsx|xls|xlsm)$/i;
 const EGO_HINT = /(tobii|scene|ego|glass|eye|first|fpv|pov|gaze|child)/i;
 const ROOM_HINT = /(room|ext|camera|cam\b|side|wall|overview|external|lab)/i;
 
@@ -16,6 +16,7 @@ const NON_OBJECT_FILL = {
   "Hands not visible": "url(#hatch)",
   "Child not visible": "url(#hatch)",
   "No gaze data": "url(#hatch)",
+  "Outside camera view": "url(#hatch)",
 };
 const MATCH_FILL = { Yes: "#0ca30c", No: "#d03b3b" };
 const LABEL_TEXT = { ego: "eye-tracking video", room: "room video", gaze: "gaze data file" };
@@ -96,6 +97,7 @@ async function init() {
   initObjects();
   initAdvanced();
   initDropzones();
+  VideoSync.init();
   $("#runBtn").addEventListener("click", runAnalysis);
   $("#cancelBtn").addEventListener("click", cancelRun);
   $("#newRun").addEventListener("click", () => { showView("setup"); updateRunButton(); });
@@ -172,24 +174,17 @@ function renderChips() {
 
 /* ------------------------------------------------------------------ advanced */
 function initAdvanced() {
-  $$("input[name=sync]").forEach(r => r.addEventListener("change", () => {
-    $("#manualOffset").disabled = $("input[name=sync]:checked").value !== "manual";
-  }));
   const tol = $("#gazeTol");
   tol.addEventListener("input", () => { $("#gazeTolVal").textContent = Number(tol.value).toFixed(1); });
 }
 function collectAdvanced() {
   return {
-    sync_mode: $("input[name=sync]:checked").value,
-    manual_offset_s: Number($("#manualOffset").value || 0),
     gaze_offset_s: Number($("#gazeOffset").value || 0),
     child_selection: $("#childSel").value,
     contact: $("#contactSel").value,
     gaze_tolerance_pct: Number($("#gazeTol").value),
     include_people: $("#includePeople").checked,
     fixations_only: $("#fixOnly").checked,
-    review_video: $("#optReviewVideo").checked,
-    max_duration_s: $("#maxDur").value ? Number($("#maxDur").value) : null,
   };
 }
 
@@ -258,7 +253,7 @@ function autoAssign(files) {
 function uploadFile(kind, file) {
   const ok = kind === "gaze" ? GAZE_RE.test(file.name) : VIDEO_RE.test(file.name);
   if (!ok) {
-    state.errors[kind] = `"${file.name}" doesn't look like a ${kind === "gaze" ? "gaze data file (.tsv, .csv, .xlsx)" : "video file"}.`;
+    state.errors[kind] = `"${file.name}" doesn't look like a ${kind === "gaze" ? "gaze data file (gazedata.gz, .tsv, .csv, .xlsx)" : "video file"}.`;
     renderZone(kind);
     return;
   }
@@ -284,6 +279,7 @@ function uploadFile(kind, file) {
     else state.errors[kind] = data.error || "Upload failed.";
     renderZone(kind);
     updateRunButton();
+    if (kind !== "gaze" && window.VideoSync) VideoSync.onVideosChanged();
   };
   xhr.onerror = () => {
     delete state.uploading[kind];
@@ -304,6 +300,7 @@ function removeFile(kind, render = true) {
   if (f) fetch(`/api/upload/${f.id}`, { method: "DELETE" }).catch(() => {});
   state.files[kind] = null;
   if (render) { renderZone(kind); updateRunButton(); }
+  if (kind !== "gaze" && window.VideoSync) VideoSync.onVideosChanged();
 }
 
 function renderZone(kind) {
@@ -320,6 +317,9 @@ function renderZone(kind) {
         el("div", { class: "file-info", text: `Uploading... ${Math.round(up.pct * 100)}%` }),
         el("div", { class: "upbar" }, el("div", { style: `width:${Math.round(up.pct * 100)}%` }))),
       xBtn("Cancel upload", () => up.xhr.abort())));
+  } else if (f && kind !== "gaze") {
+    zone.classList.add("ready");
+    body.replaceChildren();
   } else if (f) {
     zone.classList.add("ready");
     const check = el("span", { class: "check" });
@@ -337,15 +337,18 @@ function renderZone(kind) {
     nodes.push(b);
     body.replaceChildren(...nodes);
   }
+  if (kind !== "gaze" && window.VideoSync) VideoSync.renderBox(kind);
 }
 
 function updateRunButton() {
   const ready = ["ego", "room", "gaze"].every(k => state.files[k]);
   const busy = Object.keys(state.uploading).length > 0;
-  $("#runBtn").disabled = !ready || busy || !!state.poll;
+  const synced = window.VideoSync && VideoSync.isConfirmed();
+  $("#runBtn").disabled = !ready || busy || !synced || !!state.poll;
   const missing = ["ego", "room", "gaze"].filter(k => !state.files[k]).map(k => LABEL_TEXT[k]);
   $("#runHint").textContent = busy ? "Waiting for uploads to finish..."
     : missing.length ? `Still needed: ${missing.join(", ")}.`
+    : !synced ? (VideoSync.isSyncing() ? "Synchronising the videos from their sound..." : "Confirm the video synchronisation (step 1) to continue.")
     : `Ready. Processing a 10-minute session takes roughly 10-25 minutes on a regular computer.`;
 }
 
@@ -355,6 +358,7 @@ async function runAnalysis() {
   const body = {
     ego: state.files.ego.id, room: state.files.room.id, gaze: state.files.gaze.id,
     objects: state.objects.join(", "), preset: state.preset, advanced: collectAdvanced(),
+    sync: VideoSync.getConfirmed(),
   };
   $("#runBtn").disabled = true;
   let data;
@@ -460,7 +464,9 @@ function showResults(r) {
 
   // stat tiles
   const sync = r.sync;
-  const syncTxt = sync.method === "audio" ? `Videos synced from sound: ${sync.offset_s >= 0 ? "+" : ""}${sync.offset_s.toFixed(2)} s (${sync.confidence})`
+  const sgn = sync.offset_s >= 0 ? "+" : "";
+  const syncTxt = sync.method === "audio" ? `Videos synced from sound: ${sgn}${sync.offset_s.toFixed(2)} s (${sync.confidence})`
+    : sync.method === "segments" ? `Confirmed sync: ${sgn}${sync.offset_s.toFixed(3)} s`
     : sync.method === "manual" ? `Manual offset ${sync.offset_s.toFixed(2)} s` : "No sync offset applied";
   const hero = el("div", { class: "stat hero" },
     el("div", { class: "label", text: "Looking at the object being played with" }),
@@ -660,7 +666,7 @@ function renderLegend() {
     el("span", { class: `sw${hatch ? " hatch" : ""}`, style: hatch ? "" : `background:${fill}` }), el("span", { text: label }));
   const items = Object.keys(r.colors).filter(k => used.has(k)).map(k => item(k, r.colors[k]));
   $("#legend").replaceChildren(...items, el("span", { class: "sep" }),
-    item("No object (hands free / gaze elsewhere)", NEUTRAL), item("No data (hands hidden / no gaze)", "", true),
+    item("No object (hands free / gaze elsewhere)", NEUTRAL), item("No data (hands hidden / no gaze / gaze outside camera view)", "", true),
     el("span", { class: "sep" }), item("Looking at the played object", MATCH_FILL.Yes), item("Looking elsewhere", MATCH_FILL.No));
 }
 

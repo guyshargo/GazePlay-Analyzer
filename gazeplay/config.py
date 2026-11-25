@@ -19,11 +19,12 @@ CHILD_NOT_VISIBLE = "Child not visible"  # no child found in room video
 HANDS_NOT_VISIBLE = "Hands not visible"  # child found, wrists occluded
 NO_GAZE = "No gaze data"                 # blink / tracking loss / no sample
 NO_OBJECT = "No object"                  # valid gaze, but not on a known object
+OUTSIDE_VIEW = "Outside camera view"     # valid gaze outside the scene camera (e.g. looking down at the lap)
 PERSON_LABEL = "person"
 MULTI_SEP = " + "                        # joins several objects held at once
 
 NON_OBJECT_INTERACTION = {NO_INTERACTION, CHILD_NOT_VISIBLE, HANDS_NOT_VISIBLE}
-NON_OBJECT_GAZE = {NO_GAZE, NO_OBJECT}
+NON_OBJECT_GAZE = {NO_GAZE, NO_OBJECT, OUTSIDE_VIEW}
 
 # Used only when the object list is left empty AND automatic discovery fails.
 DEFAULT_TOYS = [
@@ -123,12 +124,21 @@ class Settings:
     pose_conf: float = 0.30
 
     # Synchronisation
-    sync_mode: str = "audio"        # "audio" | "manual" | "none"
+    sync_mode: str = "audio"        # "audio" | "manual" | "none" | "segments"
     manual_offset_s: float = 0.0    # room-video time at which the eye-tracking video starts
     gaze_offset_s: float = 0.0      # added to gaze timestamps
+    # Segments chosen in the sync window (sync_mode="segments"), each on its own video's clock.
+    # The two start points mark the same moment, so offset = room_start_s - ego_start_s.
+    ego_start_s: float | None = None
+    ego_end_s: float | None = None
+    room_start_s: float | None = None
+    room_end_s: float | None = None
+    sync_offset_s: float | None = None     # the offset the user confirmed (room = ego + offset)
+    audio_offset_s: float | None = None    # what the automatic audio sync found (for the report)
+    audio_confidence: str | None = None
 
     # Interaction (room video)
-    child_selection: str = "smallest"   # "smallest" | "largest" | "only"
+    child_selection: str = "only"       # "only" | "smallest" | "largest"
     contact_distance: float = 0.30      # hand-object distance, in child torso lengths
     room_crop: bool = True              # detect objects in a zoomed crop around the child
 
@@ -136,7 +146,7 @@ class Settings:
     gaze_tolerance: float = 0.02        # fraction of frame width (~1.5 deg of visual angle)
     gaze_window_s: float = 0.05         # +/- window for averaging gaze samples
     fixations_only: bool = False
-    include_people: bool = True         # "person" can be a gaze target (e.g. parent's face)
+    include_people: bool = False        # "person" can be a gaze target (e.g. parent's face)
     gaze_crop: bool = True              # detect objects in a zoomed crop around the gaze point
     gaze_crop_frac: float = 0.67        # crop side, fraction of the shorter frame side
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from .config import (APP_NAME, APP_VERSION, CHILD_NOT_VISIBLE, HANDS_NOT_VISIBLE, NO_GAZE,
-                     NO_INTERACTION, NO_OBJECT)
+                     NO_INTERACTION, NO_OBJECT, OUTSIDE_VIEW)
 from .timeline import COL_MATCH
 
 LABEL_HELP = [
@@ -19,9 +19,12 @@ LABEL_HELP = [
     ("Interacted Object", CHILD_NOT_VISIBLE, "No child found in the room video at this moment."),
     ("Gazed-at Object", "<object name>", "The gaze point falls on (or within the accuracy margin of) this object."),
     ("Gazed-at Object", NO_OBJECT, "Valid gaze, but not on any of the listed objects."),
+    ("Gazed-at Object", OUTSIDE_VIEW, "Valid gaze, but outside the scene camera's view (often looking down "
+                                      "at the lap or hands); what was looked at cannot be seen."),
     ("Gazed-at Object", NO_GAZE, "No valid gaze sample (blink, look-away, tracking loss)."),
     (COL_MATCH, "Yes / No", "Whether the gazed-at object is the object being played with."),
-    (COL_MATCH, "n/a", "Not applicable: the child is not playing with an object, or there is no gaze data."),
+    (COL_MATCH, "n/a", "Not applicable: the child is not playing with an object, there is no gaze data, "
+                       "or the gaze is outside the camera view."),
 ]
 
 
@@ -41,6 +44,7 @@ def summary_rows(metrics: dict) -> list[tuple[str, str]]:
         ("Most looked-at object", m.get("most_looked") or "-"),
         ("Valid gaze data", _fmt_pct(m["gaze_valid_pct"])),
         ("Gaze on a listed object (of valid gaze)", _fmt_pct(m["gaze_on_object_pct"])),
+        ("Gaze outside the camera view (of valid gaze)", _fmt_pct(m.get("gaze_outside_view_pct"))),
         ("Child visible in room video", _fmt_pct(m["child_visible_pct"])),
         ("Child's hands visible", _fmt_pct(m["hands_visible_pct"])),
     ]
